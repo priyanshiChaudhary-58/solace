@@ -1,0 +1,22 @@
+import express from 'express';
+import cors from 'cors';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+const db = new Database(path.join(__dirname, '../database/solace.sqlite'));
+const JWT_SECRET = process.env.SOLACE_JWT_SECRET || 'replace-this-in-production';
+app.use(cors()); app.use(express.json({limit:'4mb'}));
+app.use(express.static(path.join(__dirname, '../frontend')));
+const auth = (req,res,next)=>{ try { const t=(req.headers.authorization||'').replace('Bearer ',''); req.user=jwt.verify(t,JWT_SECRET); next(); } catch { res.status(401).json({error:'Please sign in again.'}); } };
+app.get('/api/health',(req,res)=>res.json({ok:true, name:'solace'}));
+app.post('/api/auth/signup', async (req,res)=>{ const {name,email,password}=req.body||{}; if(!name||!email||!password||password.length<8) return res.status(400).json({error:'Name, email and an 8-character password are required.'}); try { const hash=await bcrypt.hash(password,12); const info=db.prepare('INSERT INTO users(name,email,password_hash) VALUES(?,?,?)').run(name,email.toLowerCase(),hash); const token=jwt.sign({id:info.lastInsertRowid},JWT_SECRET,{expiresIn:'30d'}); res.json({token,user:{id:info.lastInsertRowid,name,email:email.toLowerCase()}}); } catch { res.status(409).json({error:'An account with that email already exists.'}); }});
+app.post('/api/auth/login', async (req,res)=>{ const {email,password}=req.body||{}; const u=db.prepare('SELECT * FROM users WHERE email=?').get((email||'').toLowerCase()); if(!u||!(await bcrypt.compare(password||'',u.password_hash))) return res.status(401).json({error:'That email and password do not match.'}); res.json({token:jwt.sign({id:u.id},JWT_SECRET,{expiresIn:'30d'}),user:{id:u.id,name:u.name,email:u.email}}); });
+app.get('/api/me',auth,(req,res)=>res.json(db.prepare('SELECT id,name,email,created_at FROM users WHERE id=?').get(req.user.id)));
+app.get('/api/records/:table',auth,(req,res)=>{ const allowed=['moods','journal_entries','habits','gratitude_entries','calm_sessions']; if(!allowed.includes(req.params.table)) return res.status(400).json({error:'Unknown record type.'}); res.json(db.prepare(`SELECT * FROM ${req.params.table} WHERE user_id=? ORDER BY created_at DESC`).all(req.user.id)); });
+app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'../frontend/solace.html')));
+app.listen(process.env.PORT||3000,()=>console.log('Solace running on http://localhost:'+(process.env.PORT||3000)));
